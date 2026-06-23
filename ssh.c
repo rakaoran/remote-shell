@@ -3,7 +3,7 @@
 #include <asm-generic/errno-base.h>
 #include <asm-generic/ioctls.h>
 #include <asm-generic/socket.h>
-#include <errno.h>
+#include <bits/types/sigset_t.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
@@ -16,6 +16,8 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/signalfd.h>
+
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -34,6 +36,7 @@ void disable_raw_mode();
 void get_win_size(uint16_t *col, uint16_t *row);
 
 int server_fd;
+int sigfd;
 
 int main(int argc, char **argv) {
     int epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -73,37 +76,54 @@ int main(int argc, char **argv) {
 
     send_win_size();
 
-    struct sigaction sigact;
-    sigact.sa_handler = sigwinch_handler;
-    sigact.sa_flags = SA_RESTART;
-    sigemptyset(&sigact.sa_mask);
+    enable_raw_mode();
+    atexit(disable_raw_mode);
 
-    if (sigaction(SIGWINCH, &sigact, NULL) == -1) {
-        perror("sigaction");
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGWINCH);
+
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+        perror("sigprocmask");
         exit(EXIT_FAILURE);
     }
 
-    enable_raw_mode();
+    if ((sigfd = signalfd(-1, &mask, 0)) == -1) {
+        perror("sigprocmask");
+        exit(EXIT_FAILURE);
+    }
 
-    struct epoll_event server_event;
+    struct epoll_event server_event = {0};
     server_event.events = EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR;
     server_event.data.fd = server_fd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &server_event);
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &server_event)) {
+        perror("epollctl add serverfd");
+        exit(EXIT_FAILURE);
+    }
 
-    struct epoll_event stdin_event;
+    struct epoll_event stdin_event = {0};
     stdin_event.events = EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR;
     stdin_event.data.fd = STDIN_FILENO;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &stdin_event);
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &stdin_event) == -1) {
+        perror("epollctl add stdin");
+        exit(EXIT_FAILURE);
+    }
+
+    struct epoll_event signal_event = {0};
+    signal_event.events = EPOLLIN;
+    signal_event.data.fd = sigfd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sigfd, &signal_event) == -1) {
+        perror("epollctl add sigfd");
+        exit(EXIT_FAILURE);
+    }
 
     struct epoll_event event;
     char packedbuf[10000];
     char buf[10000];
     char c;
-    while (1) {
+    for (;;) {
         rv = epoll_wait(epfd, &event, 1, -1);
         if (rv == -1) {
-            if (errno == EINTR)
-                continue;
             perror("epoll_wait");
             break;
         }
@@ -111,8 +131,6 @@ int main(int argc, char **argv) {
             if (event.data.fd == server_fd) {
                 int n = read(server_fd, buf, sizeof(buf));
                 if (n == -1) {
-                    if (errno == EINTR)
-                        continue;
                     perror("read from server");
                     break;
                 }
@@ -121,16 +139,12 @@ int main(int argc, char **argv) {
                 }
                 rv = write(STDIN_FILENO, buf, n);
                 if (rv == -1) {
-                    if (errno == EINTR)
-                        continue;
                     perror("read from server");
                     break;
                 }
-            } else {
+            } else if (event.data.fd == STDIN_FILENO) {
                 int n = read(STDIN_FILENO, &c, 1);
                 if (n == -1) {
-                    if (errno == EINTR)
-                        continue;
                     perror("read from stdin");
                     break;
                 }
@@ -140,11 +154,13 @@ int main(int argc, char **argv) {
                 int packet_size = pack(&c, 1, COMMAND, packedbuf, sizeof(packedbuf));
                 rv = send(server_fd, packedbuf, packet_size, MSG_NOSIGNAL);
                 if (rv == -1) {
-                    if (errno == EINTR)
-                        continue;
                     perror("read from server");
                     break;
                 }
+            } else if (event.data.fd == sigfd) {
+                struct signalfd_siginfo s;
+                int n = read(sigfd, &s, sizeof(s));
+                send_win_size();
             }
         } else {
             break;
@@ -152,7 +168,6 @@ int main(int argc, char **argv) {
     }
     close(server_fd);
     close(epfd);
-    disable_raw_mode();
 }
 struct termios old, new;
 void enable_raw_mode() {
@@ -164,10 +179,6 @@ void enable_raw_mode() {
 
 void disable_raw_mode() {
     tcsetattr(STDIN_FILENO, 0, &old);
-}
-
-void sigwinch_handler(int _) {
-    send_win_size();
 }
 
 int send_win_size() {

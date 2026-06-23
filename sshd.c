@@ -94,8 +94,11 @@ int main(int argc, char **argv) {
 
     reg_conn(server_conn);
 
-    while (1) {
-        epoll_wait(epfd, &event, 1, -1);
+    for (;;) {
+        if (epoll_wait(epfd, &event, 1, -1) == -1) {
+            perror("epoll_wait");
+            break;
+        }
         uint16_t e = event.events;
         Connection *conn = event.data.ptr;
         if (e & EPOLLIN) {
