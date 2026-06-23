@@ -6,6 +6,7 @@
 #include <bits/types/sigset_t.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -17,13 +18,13 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/signalfd.h>
-
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
-#define DEFAULT_PORT 10987
+#define DEFAULT_PORT "10987"
 
 const char COMMAND = 0;
 const char WINSIZE = 1;
@@ -40,47 +41,48 @@ int sigfd;
 
 int main(int argc, char **argv) {
 
-    unsigned short port;
-    if (argc == 1) {
-        fprintf(stderr, "Usage: ssh <remote_address> <port>\nPort is optional (default to 10987)\n");
+    char *port;
+    char *remote_server;
+    if (argc <= 1 || argc > 3) {
+        fprintf(stderr, "Usage: ssh <remote_address> <port>\nPort is optional (defaults to 10987)\n");
         exit(EXIT_FAILURE);
     }
+    remote_server = argv[1];
     if (argc == 2) {
         port = DEFAULT_PORT;
-    } else if (argc == 3) {
-        int p = atoi(argv[2]);
-        if (p < 1 || p > USHRT_MAX) {
-            fprintf(stderr, "Invalid port range.\n");
-            exit(1);
+    } else {
+        port = argv[2];
+    }
+
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int rv = getaddrinfo(remote_server, port, &hints, &res);
+    if (rv != 0) {
+        fprintf(stderr, "%s", gai_strerror(rv));
+        exit(EXIT_FAILURE);
+    }
+
+    for (p = res; p != NULL; p = p->ai_next) {
+        server_fd = socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
+        if (server_fd == -1) {
+            continue;
         }
-        port = p;
+        rv = connect(server_fd, p->ai_addr, p->ai_addrlen);
+        if (rv == 0) {
+            break;
+        }
     }
 
-    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (server_fd == -1) {
-        perror("socket");
-        exit(0);
-    }
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-        perror("setsockopt SO_REUSEADDR failed");
+    if (p == NULL) {
+        fprintf(stderr, "Could not connect");
         exit(EXIT_FAILURE);
     }
-    struct sockaddr_in sa;
 
-    int rv = inet_pton(AF_INET, argv[1], &sa.sin_addr.s_addr);
-    if (rv == 0) {
-        fprintf(stderr, "Invalid remote address\n");
-        exit(EXIT_FAILURE);
-    }
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-
-    rv = connect(server_fd, (struct sockaddr *)&sa, sizeof(sa));
-    if (rv == -1) {
-        perror("connect");
-        exit(EXIT_FAILURE);
-    }
+    freeaddrinfo(res);
 
     send_win_size();
 
