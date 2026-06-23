@@ -29,20 +29,20 @@ const char WINSIZE = 1;
 
 enum fd_t { client_fdt, master_fdt, server_fdt, signal_fdt };
 
-typedef struct Connection {
+typedef struct __connection {
     enum fd_t fd_type;
     int master_fd;
     int client_fd;
     int server_fd;
     int signal_fd;
-    struct Connection *other;
-} Connection;
+    struct __connection *other;
+} connection;
 
-void recvfrom_client(Connection *conn);
-void recvfrom_pty(Connection *conn);
+void recvfrom_client(connection *conn);
+void recvfrom_pty(connection *conn);
 void free_child_procs();
-void reg_conn(Connection *conn);
-void unreg_conn(Connection *conn);
+void reg_conn(connection *conn);
+void unreg_conn(connection *conn);
 void handle_new_conn(int cfd);
 
 int epfd;
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
     int yes = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-    Connection *server_conn = malloc(sizeof(Connection));
+    connection *server_conn = malloc(sizeof(connection));
     server_conn->server_fd = server_fd;
     server_conn->fd_type = server_fdt;
     int error = listen(server_fd, 10);
@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     int sigfd = signalfd(-1, &mask, 0);
-    Connection *signal_conn = malloc(sizeof(Connection));
+    connection *signal_conn = malloc(sizeof(connection));
     signal_conn->fd_type = signal_fdt;
     signal_conn->signal_fd = sigfd;
 
@@ -127,7 +127,7 @@ int main(int argc, char **argv) {
             break;
         }
         uint16_t e = event.events;
-        Connection *conn = event.data.ptr;
+        connection *conn = event.data.ptr;
         if (e & EPOLLIN) {
             if (conn->fd_type == server_fdt) {
                 int cfd = accept4(server_fd, NULL, NULL, SOCK_CLOEXEC);
@@ -154,7 +154,7 @@ void free_child_procs() {
         printf("Child process freed\n");
 }
 
-void reg_conn(Connection *conn) {
+void reg_conn(connection *conn) {
     struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP, .data.ptr = conn};
     switch (conn->fd_type) {
     case client_fdt:
@@ -175,8 +175,8 @@ void reg_conn(Connection *conn) {
         break;
     }
 }
-void unreg_conn(Connection *conn) {
-    struct Connection *other_conn = conn->other;
+void unreg_conn(connection *conn) {
+    connection *other_conn = conn->other;
     switch (conn->fd_type) {
     case client_fdt:
         epoll_ctl(epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
@@ -223,8 +223,8 @@ void handle_new_conn(int cfd) {
         execlp("bash", "bash", NULL);
         perror("execlp(bash)");
     } else if (pid > 0) {
-        Connection *master_conn = malloc(sizeof(Connection));
-        Connection *client_conn = malloc(sizeof(Connection));
+        connection *master_conn = malloc(sizeof(connection));
+        connection *client_conn = malloc(sizeof(connection));
         master_conn->other = client_conn;
         client_conn->other = master_conn;
         master_conn->fd_type = master_fdt;
@@ -242,7 +242,7 @@ void handle_new_conn(int cfd) {
     }
 }
 
-void recvfrom_client(Connection *conn) {
+void recvfrom_client(connection *conn) {
     uint32_t len;
     int n = recv(conn->client_fd, &len, sizeof(len), MSG_PEEK);
     if (n <= 0) {
@@ -303,7 +303,7 @@ int send_all(int fd, char *buf, ssize_t n, int opts) {
     return total;
 }
 
-void recvfrom_pty(Connection *conn) {
+void recvfrom_pty(connection *conn) {
     char buf[10000];
     int n = read(conn->master_fd, buf, sizeof(buf));
     if (n <= 0) {
