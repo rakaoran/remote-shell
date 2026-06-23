@@ -1,13 +1,16 @@
 #include "stdio.h"
 #include <arpa/inet.h>
+#include <asm-generic/errno-base.h>
 #include <asm-generic/ioctls.h>
 #include <asm-generic/socket.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <pty.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,10 +25,15 @@
 
 const char COMMAND = 0;
 const char WINSIZE = 1;
+
+int send_win_size();
+void sigwinch_handler(int _);
 uint32_t pack(char *inbuf, uint16_t in_size, char type, char *outbuf, uint16_t out_size);
 void enable_raw_mode();
 void disable_raw_mode();
 void get_win_size(uint16_t *col, uint16_t *row);
+
+int server_fd;
 
 int main(int argc, char **argv) {
     int epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -42,7 +50,7 @@ int main(int argc, char **argv) {
         port = p;
     }
 
-    int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server_fd == -1) {
         perror("socket");
         exit(0);
@@ -57,9 +65,21 @@ int main(int argc, char **argv) {
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
 
-    int err = connect(server_fd, (struct sockaddr *)&sa, sizeof(sa));
-    if (err == -1) {
+    int rv = connect(server_fd, (struct sockaddr *)&sa, sizeof(sa));
+    if (rv == -1) {
         perror("connect ossoso");
+        exit(EXIT_FAILURE);
+    }
+
+    send_win_size();
+
+    struct sigaction sigact;
+    sigact.sa_handler = sigwinch_handler;
+    sigact.sa_flags = SA_RESTART;
+    sigemptyset(&sigact.sa_mask);
+
+    if (sigaction(SIGWINCH, &sigact, NULL) == -1) {
+        perror("sigaction");
         exit(EXIT_FAILURE);
     }
 
@@ -69,6 +89,7 @@ int main(int argc, char **argv) {
     server_event.events = EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR;
     server_event.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &server_event);
+
     struct epoll_event stdin_event;
     stdin_event.events = EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR;
     stdin_event.data.fd = STDIN_FILENO;
@@ -77,21 +98,12 @@ int main(int argc, char **argv) {
     struct epoll_event event;
     char packedbuf[10000];
     char buf[10000];
-    uint16_t col, row;
-    get_win_size(&col, &row);
-    uint16_t winsize[2];
-    *winsize = htons(col);
-    *(winsize + 1) = htons(row);
-    uint32_t n = pack((char *)winsize, sizeof(winsize), WINSIZE, packedbuf, sizeof(packedbuf));
-    err = send(server_fd, packedbuf, n, MSG_NOSIGNAL);
-    if (err == -1) {
-        perror("send winsize");
-        exit(EXIT_FAILURE);
-    }
     char c;
     while (1) {
-        err = epoll_wait(epfd, &event, 1, -1);
-        if (err == -1) {
+        rv = epoll_wait(epfd, &event, 1, -1);
+        if (rv == -1) {
+            if (errno == EINTR)
+                continue;
             perror("epoll_wait");
             break;
         }
@@ -99,26 +111,37 @@ int main(int argc, char **argv) {
             if (event.data.fd == server_fd) {
                 int n = read(server_fd, buf, sizeof(buf));
                 if (n == -1) {
+                    if (errno == EINTR)
+                        continue;
                     perror("read from server");
                     break;
                 }
                 if (n == 0) {
                     break;
                 }
-                err = write(STDIN_FILENO, buf, n);
-                if (err == -1) {
+                rv = write(STDIN_FILENO, buf, n);
+                if (rv == -1) {
+                    if (errno == EINTR)
+                        continue;
                     perror("read from server");
                     break;
                 }
             } else {
                 int n = read(STDIN_FILENO, &c, 1);
-                if (n <= 0) {
+                if (n == -1) {
+                    if (errno == EINTR)
+                        continue;
                     perror("read from stdin");
                     break;
                 }
+                if (n == 0) {
+                    break;
+                }
                 int packet_size = pack(&c, 1, COMMAND, packedbuf, sizeof(packedbuf));
-                err = send(server_fd, packedbuf, packet_size, MSG_NOSIGNAL);
-                if (err == -1) {
+                rv = send(server_fd, packedbuf, packet_size, MSG_NOSIGNAL);
+                if (rv == -1) {
+                    if (errno == EINTR)
+                        continue;
                     perror("read from server");
                     break;
                 }
@@ -143,16 +166,28 @@ void disable_raw_mode() {
     tcsetattr(STDIN_FILENO, 0, &old);
 }
 
-void get_win_size(uint16_t *col, uint16_t *row) {
+void sigwinch_handler(int _) {
+    send_win_size();
+}
+
+int send_win_size() {
     struct winsize ws;
 
     if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == -1) {
         perror("ioctl");
         exit(EXIT_FAILURE);
     }
-
-    *col = ws.ws_col;
-    *row = ws.ws_row;
+    char packedbuf[100];
+    uint16_t winsize[2];
+    *winsize = htons(ws.ws_col);
+    *(winsize + 1) = htons(ws.ws_row);
+    uint32_t n = pack((char *)winsize, sizeof(winsize), WINSIZE, packedbuf, sizeof(packedbuf));
+    int err = send(server_fd, packedbuf, n, MSG_NOSIGNAL);
+    if (err == -1) {
+        perror("send winsize");
+        return err;
+    }
+    return 0;
 }
 
 uint32_t pack(char *inbuf, uint16_t in_size, char type, char *outbuf, uint16_t out_size) {

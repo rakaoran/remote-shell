@@ -80,6 +80,7 @@ void unregister_connection(int epfd, Connection *conn, int *count) {
     free(conn);
     free(other_conn);
     (*count)--;
+    free_child_processes();
 }
 
 int main(int argc, char **argv) {
@@ -227,9 +228,6 @@ int main(int argc, char **argv) {
             }
         } else {
             unregister_connection(epfd, conn, &conn_count);
-
-            // a pseudo-terminal might have hanged up
-            free_child_processes();
         }
     }
 }
