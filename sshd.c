@@ -9,12 +9,14 @@
 #include <pty.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define DEFAULT_PORT 10987
+#define MAX_CONNECTIONS 2
 
 typedef int fd_t;
 const fd_t client_fdt = 0;
@@ -33,44 +35,54 @@ void free_child_processes() {
     }
 }
 
-void register_connection(int epfd, Connection *conn) {
+void register_connection(int epfd, Connection *conn, int *count) {
     struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP, .data.ptr = conn};
     switch (conn->fd_type) {
     case client_fdt:
         epoll_ctl(epfd, EPOLL_CTL_ADD, conn->client_fd, &event);
+        printf("client fd %d registered\n", conn->client_fd);
+        (*count)++;
         break;
+
     case master_fdt:
         epoll_ctl(epfd, EPOLL_CTL_ADD, conn->master_fd, &event);
+        printf("master fd %d registered\n", conn->master_fd);
         break;
+
     case server_fdt:
         epoll_ctl(epfd, EPOLL_CTL_ADD, conn->server_fd, &event);
         break;
     }
 }
-void unregister_connection(int epfd, Connection *conn) {
+void unregister_connection(int epfd, Connection *conn, int *count) {
     struct Connection *other_conn = conn->other;
     switch (conn->fd_type) {
     case client_fdt:
         epoll_ctl(epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
         epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->master_fd, NULL);
         close(conn->client_fd);
+        printf("fd %d closed\n", conn->client_fd);
         close(other_conn->master_fd);
+        printf("fd %d closed\n", other_conn->master_fd);
         break;
     case master_fdt:
         epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->client_fd, NULL);
         epoll_ctl(epfd, EPOLL_CTL_DEL, conn->master_fd, NULL);
         close(conn->master_fd);
+        printf("fd %d closed\n", conn->master_fd);
         close(other_conn->client_fd);
+        printf("fd %d closed\n", other_conn->client_fd);
         break;
     }
     free(conn);
     free(other_conn);
+    (*count)--;
 }
 
 int main(int argc, char **argv) {
     struct epoll_event event;
     int epfd = epoll_create1(EPOLL_CLOEXEC);
-
+    int conn_count = 0;
     unsigned short port;
     if (argc == 1) {
         port = DEFAULT_PORT;
@@ -106,7 +118,7 @@ int main(int argc, char **argv) {
     Connection *server_conn = malloc(sizeof(Connection));
     server_conn->server_fd = server_fd;
     server_conn->fd_type = server_fdt;
-    register_connection(epfd, server_conn);
+    register_connection(epfd, server_conn, &conn_count);
     error = listen(server_fd, 5);
     if (error == -1) {
         perror("bind");
@@ -125,6 +137,12 @@ int main(int argc, char **argv) {
                     perror("accept");
                     continue;
                 }
+                if (conn_count >= MAX_CONNECTIONS) {
+                    char *msg = "Max connections reached, try again later\n";
+                    send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+                    close(cfd);
+                    continue;
+                }
                 if (setsockopt(cfd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) == -1) {
                     perror("setsockopt KEEPALIVE failed");
                     continue;
@@ -135,7 +153,7 @@ int main(int argc, char **argv) {
                     execlp("bash", "bash", "-i", NULL);
                     perror("execlp(bash)");
                     return 1;
-                } else {
+                } else if (pid > 0) {
                     Connection *master_conn = malloc(sizeof(Connection));
                     Connection *client_conn = malloc(sizeof(Connection));
                     master_conn->other = client_conn;
@@ -146,30 +164,34 @@ int main(int argc, char **argv) {
                     client_conn->client_fd = cfd;
                     master_conn->master_fd = masterfd;
                     client_conn->master_fd = masterfd;
-                    register_connection(epfd, client_conn);
-                    register_connection(epfd, master_conn);
+                    register_connection(epfd, client_conn, &conn_count);
+                    register_connection(epfd, master_conn, &conn_count);
+                } else {
+                    char *msg = "Unexpected problem occured, please report\n";
+                    send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+                    close(cfd);
                 }
             } else if (conn->fd_type == client_fdt) {
                 int n = read(conn->client_fd, buf, sizeof(buf));
                 if (n <= 0) {
-                    unregister_connection(epfd, conn);
+                    unregister_connection(epfd, conn, &conn_count);
                     continue;
                 }
                 n = write(conn->master_fd, buf, n);
                 if (n == -1) {
-                    unregister_connection(epfd, conn);
+                    unregister_connection(epfd, conn, &conn_count);
                     continue;
                 }
 
             } else if (conn->fd_type == master_fdt) {
                 int n = read(conn->master_fd, buf, sizeof(buf));
                 if (n <= 0) {
-                    unregister_connection(epfd, conn);
+                    unregister_connection(epfd, conn, &conn_count);
                     continue;
                 }
                 n = send(conn->client_fd, buf, n, MSG_NOSIGNAL | MSG_DONTWAIT);
                 if (n == -1) {
-                    unregister_connection(epfd, conn);
+                    unregister_connection(epfd, conn, &conn_count);
                     continue;
                 }
             } else {
@@ -177,7 +199,7 @@ int main(int argc, char **argv) {
                 exit(EXIT_FAILURE);
             }
         } else {
-            unregister_connection(epfd, conn);
+            unregister_connection(epfd, conn, &conn_count);
 
             // a pseudo-terminal might have hanged up
             free_child_processes();

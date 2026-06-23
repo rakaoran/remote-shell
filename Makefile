@@ -2,7 +2,7 @@ all: bin/sshd bin/ssh
 
 bin/sshd: sshd.c
 	@mkdir -p bin
-	@clang -Wall -Wextra -g -O0 sshd.c -o bin/sshd -lutil
+	clang -Wall -Wextra -g -O0 sshd.c -o bin/sshd 
 
 bin/ssh: ssh.c
 	@mkdir -p bin
