@@ -35,58 +35,19 @@ typedef struct Connection {
     struct Connection *other;
 } Connection;
 
-void free_child_processes() {
-    while (waitpid(-1, NULL, WNOHANG) > 0) {
-        printf("Child process freed\n");
-    }
-}
+void recvfrom_client(Connection *conn);
+void recvfrom_pty(Connection *conn);
+void free_child_procs();
+void reg_conn(Connection *conn);
+void unreg_conn(Connection *conn);
+void handle_new_conn(int cfd);
 
-void register_connection(int epfd, Connection *conn, int *count) {
-    struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP, .data.ptr = conn};
-    switch (conn->fd_type) {
-    case client_fdt:
-        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->client_fd, &event);
-        printf("client fd %d registered\n", conn->client_fd);
-        (*count)++;
-        break;
-
-    case master_fdt:
-        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->master_fd, &event);
-        break;
-
-    case server_fdt:
-        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->server_fd, &event);
-        break;
-    }
-}
-void unregister_connection(int epfd, Connection *conn, int *count) {
-    struct Connection *other_conn = conn->other;
-    switch (conn->fd_type) {
-    case client_fdt:
-        epoll_ctl(epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
-        epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->master_fd, NULL);
-        close(conn->client_fd);
-        printf("fd %d closed\n", conn->client_fd);
-        close(other_conn->master_fd);
-        break;
-    case master_fdt:
-        epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->client_fd, NULL);
-        epoll_ctl(epfd, EPOLL_CTL_DEL, conn->master_fd, NULL);
-        close(conn->master_fd);
-        close(other_conn->client_fd);
-        printf("fd %d closed\n", other_conn->client_fd);
-        break;
-    }
-    free(conn);
-    free(other_conn);
-    (*count)--;
-    free_child_processes();
-}
+int epfd;
+int conn_count = 0;
+int server_fd;
+char buf[10000];
 
 int main(int argc, char **argv) {
-    struct epoll_event event;
-    int epfd = epoll_create1(EPOLL_CLOEXEC);
-    int conn_count = 0;
     unsigned short port;
     if (argc == 1) {
         port = DEFAULT_PORT;
@@ -99,7 +60,7 @@ int main(int argc, char **argv) {
         port = p;
     }
 
-    int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server_fd == -1) {
         perror("socket");
         exit(0);
@@ -119,16 +80,19 @@ int main(int argc, char **argv) {
         perror("bind");
         exit(1);
     }
+
     Connection *server_conn = malloc(sizeof(Connection));
     server_conn->server_fd = server_fd;
     server_conn->fd_type = server_fdt;
-    register_connection(epfd, server_conn, &conn_count);
     error = listen(server_fd, 5);
     if (error == -1) {
         perror("bind");
         exit(1);
     }
-    char buf[1000000];
+    struct epoll_event event;
+    epfd = epoll_create1(EPOLL_CLOEXEC);
+
+    reg_conn(server_conn);
 
     while (1) {
         epoll_wait(epfd, &event, 1, -1);
@@ -137,97 +101,166 @@ int main(int argc, char **argv) {
         if (e & EPOLLIN) {
             if (conn->fd_type == server_fdt) {
                 int cfd = accept4(server_fd, NULL, NULL, SOCK_CLOEXEC);
-                if (cfd == -1) {
-                    perror("accept");
-                    continue;
-                }
-                if (conn_count >= MAX_CONNECTIONS) {
-                    char *msg = "Max connections reached, try again later\n";
-                    send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
-                    close(cfd);
-                    continue;
-                }
-                if (setsockopt(cfd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) == -1) {
-                    perror("setsockopt KEEPALIVE failed");
-                    continue;
-                }
-                int masterfd;
-                int pid = forkpty(&masterfd, NULL, NULL, NULL);
-                if (pid == 0) {
-                    execlp("bash", "bash", "-i", NULL);
-                    perror("execlp(bash)");
-                    return 1;
-                } else if (pid > 0) {
-                    Connection *master_conn = malloc(sizeof(Connection));
-                    Connection *client_conn = malloc(sizeof(Connection));
-                    master_conn->other = client_conn;
-                    client_conn->other = master_conn;
-                    master_conn->fd_type = master_fdt;
-                    client_conn->fd_type = client_fdt;
-                    master_conn->client_fd = cfd;
-                    client_conn->client_fd = cfd;
-                    master_conn->master_fd = masterfd;
-                    client_conn->master_fd = masterfd;
-                    register_connection(epfd, client_conn, &conn_count);
-                    register_connection(epfd, master_conn, &conn_count);
-                } else {
-                    char *msg = "Unexpected problem occured, please report\n";
-                    send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
-                    close(cfd);
-                }
+                handle_new_conn(cfd);
             } else if (conn->fd_type == client_fdt) {
-                uint32_t len;
-                int n = recv(conn->client_fd, &len, sizeof(len), MSG_PEEK);
-                len = ntohl(len);
-                if (n <= 0) {
-                    unregister_connection(epfd, conn, &conn_count);
-                    continue;
-                }
-                n = read(conn->client_fd, buf, len);
-                if (n != len) {
-                    printf("truncated packet! aborting...\n");
-                    unregister_connection(epfd, conn, &conn_count);
-                    continue;
-                }
-                int unpackedlen = len - 1 - sizeof(uint32_t);
-                if (*(buf + sizeof(uint32_t)) == COMMAND) {
-                    n = write(conn->master_fd, buf + 1 + sizeof(uint32_t), unpackedlen);
-                } else if (*(buf + sizeof(uint32_t)) == WINSIZE) {
-                    uint16_t col;
-                    uint16_t row;
-                    uint16_t *p = (uint16_t *)(buf + sizeof(uint32_t) + 1);
-                    col = *(uint16_t *)(p);
-                    row = *(uint16_t *)(p + 1);
-                    struct winsize ws;
-                    ws.ws_col = ntohs(col);
-                    ws.ws_row = ntohs(row);
-                    if (ioctl(conn->master_fd, TIOCSWINSZ, &ws) == -1) {
-                        n = -1;
-                        perror("ioctl");
-                    }
-                }
-                if (n == -1) {
-                    unregister_connection(epfd, conn, &conn_count);
-                    continue;
-                }
-
+                recvfrom_client(conn);
             } else if (conn->fd_type == master_fdt) {
-                int n = read(conn->master_fd, buf, sizeof(buf));
-                if (n <= 0) {
-                    unregister_connection(epfd, conn, &conn_count);
-                    continue;
-                }
-                n = send(conn->client_fd, buf, n, MSG_NOSIGNAL | MSG_DONTWAIT);
-                if (n == -1) {
-                    unregister_connection(epfd, conn, &conn_count);
-                    continue;
-                }
+                recvfrom_pty(conn);
             } else {
                 fprintf(stderr, "Unexpected fd type: %d\n", conn->fd_type);
                 exit(EXIT_FAILURE);
             }
         } else {
-            unregister_connection(epfd, conn, &conn_count);
+            unreg_conn(conn);
         }
+    }
+}
+void free_child_procs() {
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        printf("Child process freed\n");
+    }
+}
+
+void reg_conn(Connection *conn) {
+    struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP, .data.ptr = conn};
+    switch (conn->fd_type) {
+    case client_fdt:
+        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->client_fd, &event);
+        printf("client fd %d registered\n", conn->client_fd);
+        conn_count++;
+        break;
+
+    case master_fdt:
+        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->master_fd, &event);
+        break;
+
+    case server_fdt:
+        epoll_ctl(epfd, EPOLL_CTL_ADD, conn->server_fd, &event);
+        break;
+    }
+}
+void unreg_conn(Connection *conn) {
+    struct Connection *other_conn = conn->other;
+    switch (conn->fd_type) {
+    case client_fdt:
+        epoll_ctl(epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
+        epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->master_fd, NULL);
+        close(conn->client_fd);
+        printf("fd %d closed\n", conn->client_fd);
+        close(other_conn->master_fd);
+        break;
+    case master_fdt:
+        epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->client_fd, NULL);
+        epoll_ctl(epfd, EPOLL_CTL_DEL, conn->master_fd, NULL);
+        close(conn->master_fd);
+        close(other_conn->client_fd);
+        printf("fd %d closed\n", other_conn->client_fd);
+        break;
+    }
+    free(conn);
+    free(other_conn);
+    conn_count--;
+    free_child_procs();
+}
+void handle_new_conn(int cfd) {
+    if (cfd == -1) {
+        perror("accept");
+        return;
+    }
+    if (conn_count >= MAX_CONNECTIONS) {
+        char *msg = "Max connections reached, try again later\n";
+        send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+        close(cfd);
+        return;
+    }
+    int opt = 1;
+    if (setsockopt(cfd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) == -1) {
+        perror("setsockopt KEEPALIVE failed");
+        return;
+    }
+    int masterfd;
+    int pid = forkpty(&masterfd, NULL, NULL, NULL);
+    if (pid == 0) {
+        execlp("bash", "bash", NULL);
+        perror("execlp(bash)");
+    } else if (pid > 0) {
+        Connection *master_conn = malloc(sizeof(Connection));
+        Connection *client_conn = malloc(sizeof(Connection));
+        master_conn->other = client_conn;
+        client_conn->other = master_conn;
+        master_conn->fd_type = master_fdt;
+        client_conn->fd_type = client_fdt;
+        master_conn->client_fd = cfd;
+        client_conn->client_fd = cfd;
+        master_conn->master_fd = masterfd;
+        client_conn->master_fd = masterfd;
+        reg_conn(client_conn);
+        reg_conn(master_conn);
+    } else {
+        char *msg = "Unexpected problem occured, please report\n";
+        send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+        close(cfd);
+    }
+}
+
+void recvfrom_client(Connection *conn) {
+    uint32_t len;
+    int n = recv(conn->client_fd, &len, sizeof(len), MSG_PEEK);
+    if (n <= 0) {
+        unreg_conn(conn);
+        return;
+    }
+
+    len = ntohl(len);
+    if (len > sizeof(buf)) {
+        printf("packet too large\n");
+        unreg_conn(conn);
+        return;
+    }
+    n = read(conn->client_fd, buf, len);
+    if (n != (int)len) {
+        printf("truncated packet! aborting...\n");
+        unreg_conn(conn);
+        return;
+    }
+    int unpackedlen = len - 1 - sizeof(uint32_t);
+    if (*(buf + sizeof(uint32_t)) == COMMAND) {
+        n = write(conn->master_fd, buf + 1 + sizeof(uint32_t), unpackedlen);
+        if (n <= 0) {
+            unreg_conn(conn);
+            return;
+        }
+    } else if (*(buf + sizeof(uint32_t)) == WINSIZE) {
+        uint16_t col;
+        uint16_t row;
+        uint16_t *p = (uint16_t *)(buf + sizeof(uint32_t) + 1);
+        col = *(uint16_t *)(p);
+        row = *(uint16_t *)(p + 1);
+        struct winsize ws;
+        ws.ws_col = ntohs(col);
+        ws.ws_row = ntohs(row);
+        if (ioctl(conn->master_fd, TIOCSWINSZ, &ws) == -1) {
+            n = -1;
+            perror("ioctl");
+            return;
+        }
+    }
+    if (n == -1) {
+        unreg_conn(conn);
+        return;
+    }
+}
+
+void recvfrom_pty(Connection *conn) {
+    char buf[1999];
+    int n = read(conn->master_fd, buf, sizeof(buf));
+    if (n <= 0) {
+        unreg_conn(conn);
+        return;
+    }
+    n = send(conn->client_fd, buf, n, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (n == -1) {
+        unreg_conn(conn);
+        return;
     }
 }
