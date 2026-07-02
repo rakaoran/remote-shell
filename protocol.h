@@ -1,4 +1,6 @@
-#include <stddef.h>
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
 #include <sys/types.h>
 
 #ifndef MAX_PACKET_SIZE
@@ -48,3 +50,5 @@ int proto_read(proto_conn *conn, char *buf, size_t len);
 int proto_write(proto_conn *conn, char *buf, size_t len);
 proto_conn *proto_new(int tcp_fd);
 void proto_free(proto_conn *con);
+
+#endif

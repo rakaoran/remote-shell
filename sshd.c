@@ -17,13 +17,13 @@ const char WINSIZE = 1;
 
 enum fd_t { client_fdt, master_fdt, server_fdt, signal_fdt };
 
-typedef struct _connection {
+typedef struct connection_ {
 	enum fd_t fd_type;
 	int master_fd;
 	int server_fd;
 	int signal_fd;
 	proto_conn *proto_conn;
-	struct _connection *other;
+	struct connection_ *other;
 } connection;
 
 void recvfrom_client(connection *conn);

@@ -111,7 +111,7 @@ int proto_flush(proto_conn *conn) {
 				return 0;
 			return -1;
 		}
-		rb_consume(conn->outrb, n);
+		rb_consume(conn->outrb, rv);
 	}
 	return 0;
 }
@@ -137,14 +137,15 @@ int proto_load(proto_conn *conn) {
 	}
 }
 
-int proto_read(proto_conn *conn, char *buf, size_t _) {
+int proto_read(proto_conn *conn, char *buf, size_t len) {
 	uint16_t packet_len;
 	int n = rb_copy(conn->inrb, (char *)&packet_len, sizeof(packet_len));
 	if (n != 2) {
 		return 0;
 	}
 	packet_len = ntohs(packet_len);
-	if (packet_len > MAX_PACKET_SIZE) {
+	size_t payload_len = packet_len - 2;
+	if (packet_len > MAX_PACKET_SIZE || payload_len > len) {
 		return -1;
 	}
 
@@ -152,7 +153,6 @@ int proto_read(proto_conn *conn, char *buf, size_t _) {
 	if (pending_in < packet_len) {
 		return 0;
 	}
-	size_t payload_len = packet_len - 2;
 	rb_consume(conn->inrb, 2);
 	rb_copy(conn->inrb, buf, payload_len);
 	rb_consume(conn->inrb, payload_len);
@@ -166,11 +166,15 @@ int proto_write(proto_conn *conn, char *buf, size_t len) {
 	if (len > MAX_PAYLOAD_SIZE) {
 		return -1;
 	}
-	uint16_t packlen = htons(len + 2);
-	char *p = (char *)&packlen;
-	int rv = rb_append(conn->outrb, p, 2);
-	if (rv == -1) {
+	size_t available_space = rb_size(conn->outrb) - rb_pending(conn->outrb);
+
+	if (len + 2 > available_space) {
 		return -1;
 	}
-	return rb_append(conn->outrb, buf, len);
+
+	uint16_t packlen = htons(len + 2);
+	char *p = (char *)&packlen;
+	rb_append(conn->outrb, p, 2);
+	rb_append(conn->outrb, buf, len);
+	return 0;
 }

@@ -111,7 +111,7 @@ void test_proto_write(void) {
 	char buf[20];
 	rb_copy(end2_conn->outrb, buf, 20);
 	// \x00\x0e is just 14 in hex, as a 2 bytes number in network bytes order
-	TEST_ASSERT_EQUAL_STRING_MESSAGE("\x00\x0ehello there", buf,
+	TEST_ASSERT_EQUAL_MEMORY_MESSAGE("\x00\x0ehello there", buf, 14,
 					 "proto_write must write things to ring buf correctly");
 
 	TEST_ASSERT_EQUAL_INT_MESSAGE(-1, proto_write(end2_conn, buf, MAX_PAYLOAD_SIZE + 1),
