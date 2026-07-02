@@ -89,7 +89,9 @@ int main(int argc, char **argv) {
 
 	conn = proto_new(server_fd);
 
-	send_win_size();
+	if (send_win_size() < 0) {
+		fprintf(stderr, "Failed\n");
+	}
 	int epfd = epoll_create1(EPOLL_CLOEXEC);
 
 	struct epoll_event server_event = {0};
@@ -128,20 +130,17 @@ int main(int argc, char **argv) {
 		}
 		if (event.events & (EPOLLIN)) {
 			if (event.data.fd == server_fd) {
-				proto_load(conn);
-				int n;
+				int n = proto_load(conn);
+				if (n < 0) {
+					break;
+				}
 				while ((n = proto_read(conn, buf, sizeof(buf))) > 0) {
-					if (n < 0) {
-						break;
-					}
 					rv = write(STDOUT_FILENO, buf, n);
 					if (rv == -1) {
 						perror("write to stdout");
 						break;
 					}
 					if (rv != n) {
-						printf("rietmorietmroitmroetmrsieotmrstmsoitmrsietmrsietmrtmrstmrsietms"
-						       "tmstmsrml\n");
 					}
 				}
 				if (n == -1) {
@@ -149,23 +148,25 @@ int main(int argc, char **argv) {
 				}
 			} else if (event.data.fd == STDIN_FILENO) {
 				int n = read(STDIN_FILENO, &c, 1);
-				if (n == -1) {
+				if (n <= 0) {
 					perror("read from stdin");
-					break;
-				}
-				if (n == 0) {
 					break;
 				}
 				int packet_size = pack(&c, 1, COMMAND, packetbuf, sizeof(packetbuf));
 				rv = proto_write(conn, packetbuf, packet_size);
 				if (rv < 0) {
-					fprintf(stderr, "write to server failed\n");
-					exit(EXIT_FAILURE);
+					break;
+				}
+				rv = proto_flush(conn);
+				if (rv < 0) {
+					break;
 				}
 			} else if (event.data.fd == sigfd) {
 				struct signalfd_siginfo s;
 				read(sigfd, &s, sizeof(s));
-				send_win_size();
+				if (send_win_size() < 0) {
+					break;
+				}
 			}
 		} else {
 			break;
@@ -194,6 +195,7 @@ int send_win_size() {
 		perror("ioctl");
 		exit(EXIT_FAILURE);
 	}
+	printf("winsize: %d - %d\n", ws.ws_row, ws.ws_col);
 	char packedbuf[100];
 	uint16_t winsize[2];
 	*winsize = htons(ws.ws_col);
@@ -201,8 +203,11 @@ int send_win_size() {
 	uint32_t n = pack((char *)winsize, sizeof(winsize), WINSIZE, packedbuf, sizeof(packedbuf));
 	int err = proto_write(conn, packedbuf, n);
 	if (err < 0) {
-		perror("send winsize");
-		return err;
+		return -1;
+	}
+	err = proto_flush(conn);
+	if (err < 0) {
+		return -1;
 	}
 	return 0;
 }

@@ -238,24 +238,20 @@ void recvfrom_client(connection *conn) {
 		if (*buf == COMMAND) {
 			int written = write(conn->other->master_fd, buf + 1, n - 1);
 			if (written <= 0) {
-				printf("unregistering because we couldn't write to master\n");
 				unreg_conn(conn);
 				return;
-			}
-			if (written != n - 1) {
-				printf("rietmorietmroitmroetmrsieotmrstmsoitmrsietmrsietmrtmrstmrsietmstmstmsrml\n");
 			}
 		} else if (*buf == WINSIZE) {
 			uint16_t col;
 			uint16_t row;
-			uint16_t *p = (uint16_t *)(buf + sizeof(uint32_t) + 1);
+			uint16_t *p = (uint16_t *)(buf + 1);
 			col = *(uint16_t *)(p);
 			row = *(uint16_t *)(p + 1);
 			struct winsize ws;
 			ws.ws_col = ntohs(col);
 			ws.ws_row = ntohs(row);
+			printf("winsize: %d - %d\n", ws.ws_row, ws.ws_col);
 			if (ioctl(conn->other->master_fd, TIOCSWINSZ, &ws) == -1) {
-				printf("unregistering because we couldn't write to master\n");
 				unreg_conn(conn);
 				perror("ioctl");
 				break;
@@ -265,7 +261,6 @@ void recvfrom_client(connection *conn) {
 		}
 	}
 	if (n == -1) {
-		printf("unregistering because proto_read returned -1\n");
 		unreg_conn(conn);
 	}
 }
@@ -273,13 +268,17 @@ void recvfrom_client(connection *conn) {
 void recvfrom_pty(connection *conn) {
 	int n = read(conn->master_fd, buf, sizeof(buf));
 	if (n <= 0) {
-		printf("unregistering because we couldn't read from master fd \n");
 		unreg_conn(conn);
 		return;
 	}
 	int rv = proto_write(conn->other->proto_conn, buf, n);
 	if (rv < 0) {
-		printf("unregistering because we write to client with proto_write from recvfrom_pty \n");
 		unreg_conn(conn);
+		return;
+	}
+	rv = proto_flush(conn->other->proto_conn);
+	if (rv < 0) {
+		unreg_conn(conn);
+		return;
 	}
 }
