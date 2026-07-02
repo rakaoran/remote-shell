@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 ringbuf *rb_new(size_t size) {
 	ringbuf *rb = malloc(sizeof(ringbuf));
@@ -96,6 +97,7 @@ proto_conn *proto_new(int tcp_fd) {
 }
 
 void proto_free(proto_conn *conn) {
+	close(conn->tcp_fd);
 	rb_free(conn->inrb);
 	rb_free(conn->outrb);
 	free(conn);
@@ -108,7 +110,7 @@ int proto_flush(proto_conn *conn) {
 		int rv = send(conn->tcp_fd, temp, n, MSG_DONTWAIT | MSG_NOSIGNAL);
 		if (rv == -1) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				return 0;
+				return rb_pending(conn->outrb);
 			return -1;
 		}
 		rb_consume(conn->outrb, rv);
@@ -144,8 +146,11 @@ int proto_read(proto_conn *conn, char *buf, size_t len) {
 		return 0;
 	}
 	packet_len = ntohs(packet_len);
+	if (packet_len > MAX_PACKET_SIZE || packet_len < 2) {
+		return -1;
+	}
 	size_t payload_len = packet_len - 2;
-	if (packet_len > MAX_PACKET_SIZE || payload_len > len) {
+	if (payload_len > len) {
 		return -1;
 	}
 

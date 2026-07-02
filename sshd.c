@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
 			perror("epoll_wait");
 			break;
 		}
-		uint16_t e = event.events;
+		uint32_t e = event.events;
 		connection *conn = event.data.ptr;
 		if (e & EPOLLIN) {
 			if (conn->fd_type == server_fdt) {
@@ -131,6 +131,14 @@ int main(int argc, char **argv) {
 			} else {
 				fprintf(stderr, "Unexpected fd type: %d\n", conn->fd_type);
 				exit(EXIT_FAILURE);
+			}
+		} else if (e & EPOLLOUT) {
+			int n = proto_flush(conn->proto_conn);
+			if (n == 0) {
+				struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP, .data.ptr = conn};
+				epoll_ctl(epfd, EPOLL_CTL_MOD, conn->proto_conn->tcp_fd, &event);
+			} else if (n == -1) {
+				unreg_conn(conn);
 			}
 		} else {
 			printf("unregistering because we got a hangup\n");
@@ -171,7 +179,6 @@ void unreg_conn(connection *conn) {
 	case client_fdt:
 		epoll_ctl(epfd, EPOLL_CTL_DEL, conn->proto_conn->tcp_fd, NULL);
 		epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->master_fd, NULL);
-		close(conn->proto_conn->tcp_fd);
 		printf("fd %d closed\n", conn->proto_conn->tcp_fd);
 		close(other_conn->master_fd);
 		proto_free(conn->proto_conn);
@@ -180,8 +187,8 @@ void unreg_conn(connection *conn) {
 		epoll_ctl(epfd, EPOLL_CTL_DEL, other_conn->proto_conn->tcp_fd, NULL);
 		epoll_ctl(epfd, EPOLL_CTL_DEL, conn->master_fd, NULL);
 		close(conn->master_fd);
-		close(other_conn->proto_conn->tcp_fd);
 		printf("fd %d closed\n", other_conn->proto_conn->tcp_fd);
+		proto_free(conn->other->proto_conn);
 		break;
 	case server_fdt:
 		break;
@@ -250,7 +257,6 @@ void recvfrom_client(connection *conn) {
 			struct winsize ws;
 			ws.ws_col = ntohs(col);
 			ws.ws_row = ntohs(row);
-			printf("winsize: %d - %d\n", ws.ws_row, ws.ws_col);
 			if (ioctl(conn->other->master_fd, TIOCSWINSZ, &ws) == -1) {
 				unreg_conn(conn);
 				perror("ioctl");
@@ -280,5 +286,9 @@ void recvfrom_pty(connection *conn) {
 	if (rv < 0) {
 		unreg_conn(conn);
 		return;
+	}
+	if (rv > 0) {
+		struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP | EPOLLOUT, .data.ptr = conn->other};
+		epoll_ctl(epfd, EPOLL_CTL_MOD, conn->other->proto_conn->tcp_fd, &event);
 	}
 }

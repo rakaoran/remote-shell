@@ -195,7 +195,6 @@ int send_win_size() {
 		perror("ioctl");
 		exit(EXIT_FAILURE);
 	}
-	printf("winsize: %d - %d\n", ws.ws_row, ws.ws_col);
 	char packedbuf[100];
 	uint16_t winsize[2];
 	*winsize = htons(ws.ws_col);

@@ -191,7 +191,7 @@ void test_proto_flush_and_load(void) {
 
 	int garbage = clog_fd(end2_conn->tcp_fd);
 	proto_write(end2_conn, "meowwww", 8);
-	TEST_ASSERT_EQUAL_INT_MESSAGE(0, proto_flush(end2_conn), "Flush with EAGAIN");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(10, proto_flush(end2_conn), "Flush with EAGAIN");
 	TEST_ASSERT_EQUAL_size_t_MESSAGE(10, rb_pending(end2_conn->outrb), "nothing was flushed");
 	unclog_fd(end1_conn->tcp_fd, garbage);
 	TEST_ASSERT_EQUAL_INT_MESSAGE(0, proto_flush(end2_conn), "Flush after EAGAIN");
