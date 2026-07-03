@@ -250,12 +250,9 @@ void recvfrom_client(connection *conn) {
 		} else if (*buf == WINSIZE) {
 			uint16_t col;
 			uint16_t row;
-			uint16_t *p = (uint16_t *)(buf + 1);
-			col = *(uint16_t *)(p);
-			row = *(uint16_t *)(p + 1);
-			struct winsize ws;
-			ws.ws_col = ntohs(col);
-			ws.ws_row = ntohs(row);
+			memcpy(&col, (buf + 1), sizeof(uint16_t));
+			memcpy(&row, (buf + 3), sizeof(uint16_t));
+			struct winsize ws = {.ws_col = ntohs(col), .ws_row = ntohs(row)};
 			if (ioctl(conn->other->master_fd, TIOCSWINSZ, &ws) == -1) {
 				unreg_conn(conn);
 				perror("ioctl");

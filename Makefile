@@ -2,11 +2,11 @@ all: client server
 
 server: sshd.c protocol.c protocol.h
 	@mkdir -p bin
-	clang -Wall -Wextra -g -O0 protocol.c sshd.c -o bin/sshd 
+	clang -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -Wall -Wextra protocol.c sshd.c -o bin/sshd 
 
 client: ssh.c protocol.c protocol.h
 	@mkdir -p bin
-	clang -Wall -Wextra -g -O0 ssh.c protocol.c -o bin/ssh
+	clang -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -Wall -Wextra ssh.c protocol.c -o bin/ssh
 
 protocol-test: protocol.c protocol.h test_protocol.c
 	@mkdir -p bin
